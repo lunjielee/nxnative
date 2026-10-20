@@ -68,6 +68,20 @@ Everything it writes stays in the NSP folder: intermediate files and logs in `<i
 
 On the device, environment switches go in `Documents/env.txt` (one `KEY=VALUE` per line), and game files are also accepted at `Documents/romfs`.
 
+### Rapid testing with LiveContainer
+
+`scripts/push_livecontainer.py` streams a rebuilt `DmIOS` binary directly to LiveContainer on a connected iOS device over usbmux, avoiding repackaging and reinstalling the whole multi-gigabyte IPA:
+
+```bash
+# Push the current Release build for the detected game
+python3 scripts/push_livecontainer.py
+
+# Rebuild DmIOS with xcodebuild and push in one step
+python3 scripts/push_livecontainer.py -b -t 01008CF01BAAC000
+```
+
+The script streams the binary in 4 MB chunks (~70–85 MB/s) and resets `LCPatchRevision` to `0` in `LCAppInfo.plist` (in binary plist format) so LiveContainer automatically re-patches the binary (`MH_EXECUTE` -> `MH_DYLIB`, `__PAGEZERO`, and `TweakLoader.dylib` injection) on next launch. Force-quit LiveContainer in the iOS App Switcher after pushing so it invalidates its in-memory metadata cache.
+
 ## Port another game
 
 Each game has a profile in `dm/games/<id>/`:

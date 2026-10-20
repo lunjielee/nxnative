@@ -4,3 +4,5 @@
 .iosdd_*/
 .DS_Store
 __pycache__/
+/Games/
+tmp_*/
