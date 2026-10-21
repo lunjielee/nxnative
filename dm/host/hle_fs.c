@@ -85,8 +85,18 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     if (g_nmnt >= MAX_MOUNT) die("mount table full");
     strlcpy(g_mnt[g_nmnt].name, name, sizeof g_mnt[0].name);
     g_mnt[g_nmnt].ro = ro; g_mnt[g_nmnt].overlay[0] = 0; g_mnt[g_nmnt].commit[0] = 0;
-    if (!strcmp(name, "rom") && getenv("DM_ROMFS_OVERLAY"))
-        strlcpy(g_mnt[g_nmnt].overlay, getenv("DM_ROMFS_OVERLAY"), sizeof g_mnt[0].overlay);
+    if (!strcmp(name, "rom")) {
+        const char *ov = getenv("DM_ROMFS_OVERLAY");
+        if (ov) strlcpy(g_mnt[g_nmnt].overlay, ov, sizeof g_mnt[0].overlay);
+        else {
+            char reg[1024]; snprintf(reg, sizeof reg, "%s/region_common", dir);
+            struct stat st;
+            if (!stat(reg, &st) && S_ISDIR(st.st_mode)) {
+                strlcpy(g_mnt[g_nmnt].overlay, reg, sizeof g_mnt[0].overlay);
+                LOG("fs mount %s: detected region_common layout, overlaying %s", name, reg);
+            }
+        }
+    }
     // The transaction directory cannot be set up (leftovers cannot be cleared / clone failed, which really happens on a full disk): do not exit; mount the committed directory read-only -- saves still read, every write fails, commits are no-ops, the committed version is untouched, and the front end is told
     // (each of these three failures used to call die: with the phone's storage full the game exited as soon as it mounted its saves)
     int txn_err = 0;
@@ -322,10 +332,20 @@ HLE_FORCE("_ZN2nn2fs22QueryMountRomCacheSizeEPm", "fsp-srv; rom reads the host d
 HLE_FORCE("_ZN2nn2fs8MountRomEPKcPvm", "fsp-srv; rom → host RomFS directory", Result, h_fs_MountRom, const char *name, void *cache, size_t sz) {
     (void)cache; (void)sz; char b[1024];
     Result r = mount(name, envdir("DM_ROMFS", "data/switch/3.3.94012/Update/RomFS", b, sizeof b), 1);
-    if (r == RES_OK && getenv("DM_ROMFS_OVERLAY")) {
+    if (r == RES_OK) {
         PATH_LOCK();
         for (int i = 0; i < g_nmnt; i++) if (!strcmp(g_mnt[i].name, name)) {
-            strlcpy(g_mnt[i].overlay, getenv("DM_ROMFS_OVERLAY"), sizeof g_mnt[i].overlay); break;
+            const char *ov = getenv("DM_ROMFS_OVERLAY");
+            if (ov) strlcpy(g_mnt[i].overlay, ov, sizeof g_mnt[i].overlay);
+            else if (!g_mnt[i].overlay[0]) {
+                char reg[1024]; snprintf(reg, sizeof reg, "%s/region_common", g_mnt[i].dir);
+                struct stat st;
+                if (!stat(reg, &st) && S_ISDIR(st.st_mode)) {
+                    strlcpy(g_mnt[i].overlay, reg, sizeof g_mnt[i].overlay);
+                    LOG("fs mount %s: detected region_common layout, overlaying %s", name, reg);
+                }
+            }
+            break;
         }
     }
     return r;
@@ -678,6 +698,7 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
         static uint64_t n, bytes, next_b = 64 << 20; static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
         pthread_mutex_lock(&m); n++; bytes += got;
         if (bytes >= next_b || n % 1000 == 0) { LOG("fs read total: %llu reads %.1f MiB (this one: fd %d offset %#llx length %#zx)", n, bytes / 1048576.0, (int)h, off, got); if (bytes >= next_b) next_b += 64 << 20; }
+        else LOG("fs read: fd %d offset %#llx length %#zx -> got %#zx", (int)h, (long long)off, sz, got);
         pthread_mutex_unlock(&m);
     }
     return RES_OK;
@@ -707,7 +728,9 @@ HLE_FORCE("_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", "fsp
 HLE_FORCE("_ZN2nn2fs11GetFileSizeEPlNS0_10FileHandleE", "fsp-srv → fstat(2)", Result, h_fs_GetFileSize, int64_t *out, uint64_t h) {
     if (!h) return RES_FAIL;
     struct stat st; if (fstat((int)h, &st)) return err_res("fstat", "fd");
-    *out = (int)h < 4096 && g_hm[(int)h] ? g_hm[(int)h]->size : st.st_size; return RES_OK;
+    *out = (int)h < 4096 && g_hm[(int)h] ? g_hm[(int)h]->size : st.st_size;
+    if (g_flag.fs) LOG("fs size fd %d -> %lld", (int)h, (long long)*out);
+    return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs11SetFileSizeENS0_10FileHandleEl", "fsp-srv → ftruncate(2)", Result, h_fs_SetFileSize, uint64_t h, int64_t sz) {
     if (!h) return RES_FAIL;
@@ -718,6 +741,7 @@ HLE_FORCE("_ZN2nn2fs11SetFileSizeENS0_10FileHandleEl", "fsp-srv → ftruncate(2)
 HLE_FORCE("_ZN2nn2fs9FlushFileENS0_10FileHandleE", "fsp-srv; host writes are already in the page cache, flushing is a no-op", Result, h_fs_FlushFile, uint64_t h) { (void)h; return RES_OK; }
 HLE_FORCE("_ZN2nn2fs9CloseFileENS0_10FileHandleE", "fsp-srv → close(2)", void, h_fs_CloseFile, uint64_t h) {
     if (!h) return;   // the null handle after a failed open (see ReadFile): do not touch fd 0
+    if (g_flag.fs) LOG("fs close fd %d", (int)h);
     g_fmode[(int)h & 0xffff] = 0; g_fsave[(int)h & 0xffff] = 0;
     if ((int)h >= 0 && (int)h < 4096 && g_hm[(int)h]) { holemap *m = g_hm[(int)h]; g_hm[(int)h] = NULL; free(m->log); free(m->len); free(m->phys); free(m); }
     close((int)h); }
@@ -889,3 +913,86 @@ HLE_FORCE("_ZN2nn2fs18IsSaveDataExistingERKNS_7account3UidE", "fsp-srv; save dat
 HLE_FORCE("_ZN2nn2fs26SetPriorityOnCurrentThreadENS0_8PriorityE", "fsp-srv; file read priority, ignored by the host", void, h_fs_SetPrio, int prio) { (void)prio; }
 HLE_FORCE("_ZN2nn2fs6detail18IsEnabledAccessLogEj", "fsp-srv; access log always off (returns bool)", unsigned, h_fs_AccessLogMask, unsigned mask) { (void)mask; return 0; }
 HLE_FORCE("_ZN2nn2fs6detail18IsEnabledAccessLogEv", "fsp-srv; access log always off (returns bool)", unsigned, h_fs_AccessLog, void) { return 0; }
+
+// ---------- Standard C Library I/O (stdio) ----------
+// Games built with standard libc++ or C runtime (e.g. basic_filebuf in Echoes of Wisdom) call fopen/fread/fclose etc.
+// with Horizon virtual paths ("rom:/..."). Map these to host paths via host_path before delegating to host libc.
+HLE_FORCE("fopen", "stdio fopen routed to host fs", void *, h_stdio_fopen, const char *path, const char *mode) {
+    if (!path || !mode) return NULL;
+    char hp[1024];
+    int ro = 0;
+    const char *actual = path;
+    if (strchr(path, ':')) {
+        PATH_LOCK();
+        if (host_path(path, hp, sizeof hp, &ro)) {
+            actual = hp;
+        } else {
+            if (g_flag.fs) LOG("fs fopen not found: %s", path);
+            return NULL;
+        }
+    }
+    if (ro && (strchr(mode, 'w') || strchr(mode, 'a') || strchr(mode, '+'))) {
+        LOG("fs fopen write to a read-only mount: %s", actual);
+        errno = EROFS;
+        return NULL;
+    }
+    FILE *f = fopen(actual, mode);
+    if (g_flag.fs) LOG("fs fopen %s (%s, mode %s) → %p", path, actual, mode, f);
+    return f;
+}
+
+HLE_FORCE("fclose", "stdio fclose", int, h_stdio_fclose, void *f) {
+    if (!f) return 0;
+    return fclose((FILE *)f);
+}
+
+HLE_FORCE("fread", "stdio fread", size_t, h_stdio_fread, void *ptr, size_t size, size_t count, void *f) {
+    if (!f || !ptr || !size || !count) return 0;
+    dm_guest_write_prepare(ptr, size * count);
+    return fread(ptr, size, count, (FILE *)f);
+}
+
+HLE_FORCE("fwrite", "stdio fwrite", size_t, h_stdio_fwrite, const void *ptr, size_t size, size_t count, void *f) {
+    if (!f || !ptr || !size || !count) return 0;
+    return fwrite(ptr, size, count, (FILE *)f);
+}
+
+HLE_FORCE("fseeko", "stdio fseeko", int, h_stdio_fseeko, void *f, off_t offset, int whence) {
+    if (!f) return -1;
+    return fseeko((FILE *)f, offset, whence);
+}
+
+HLE_FORCE("ftello", "stdio ftello", off_t, h_stdio_ftello, void *f) {
+    if (!f) return -1;
+    return ftello((FILE *)f);
+}
+
+HLE_FORCE("fseek", "stdio fseek", int, h_stdio_fseek, void *f, long offset, int whence) {
+    if (!f) return -1;
+    return fseek((FILE *)f, offset, whence);
+}
+
+HLE_FORCE("ftell", "stdio ftell", long, h_stdio_ftell, void *f) {
+    if (!f) return -1;
+    return ftell((FILE *)f);
+}
+
+HLE_FORCE("fflush", "stdio fflush", int, h_stdio_fflush, void *f) {
+    if (!f) return 0;
+    return fflush((FILE *)f);
+}
+
+HLE_FORCE("feof", "stdio feof", int, h_stdio_feof, void *f) {
+    if (!f) return 0;
+    return feof((FILE *)f);
+}
+
+HLE_FORCE("ferror", "stdio ferror", int, h_stdio_ferror, void *f) {
+    if (!f) return 0;
+    return ferror((FILE *)f);
+}
+
+HLE_FORCE("clearerr", "stdio clearerr", void, h_stdio_clearerr, void *f) {
+    if (!f) return;
+    clearerr((FILE *)f);
+}

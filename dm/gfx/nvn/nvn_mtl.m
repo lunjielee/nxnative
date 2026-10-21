@@ -1039,6 +1039,8 @@ static const pfv_pair g_pfv_srgb[] = {
 };
 static int tex_need_pfv(MTLPixelFormat base, MTLPixelFormat view) {
     if (base == view) return 0;
+    if ((base == MTLPixelFormatDepth32Float_Stencil8 && view == (MTLPixelFormat)261 /* MTLPixelFormatX32_Stencil8 */) ||
+        (base == (MTLPixelFormat)255 /* Depth24Unorm_Stencil8 */ && view == (MTLPixelFormat)262 /* X24_Stencil8 */)) return 0;
     for (size_t i = 0; i < sizeof g_pfv_srgb / sizeof *g_pfv_srgb; i++)
         if ((base == g_pfv_srgb[i].a && view == g_pfv_srgb[i].b) || (base == g_pfv_srgb[i].b && view == g_pfv_srgb[i].a)) return 0;
     return 1;
@@ -2773,20 +2775,47 @@ static id<MTLTexture> tex_by_id(int tid) {   // Caller holds g_rmu
     id<MTLTexture> base = tex_mtl(&rp->t);
     if (!base) return nil;
     v = base;
-    // Channel swizzle: the view's if set, otherwise the one from texture building; identity builds no view (SMBW's font cache is (1 1 1 R): without the swizzle glyphs become white blocks)
-    uint8_t sw[4] = {MTLTextureSwizzleRed, MTLTextureSwizzleGreen, MTLTextureSwizzleBlue, MTLTextureSwizzleAlpha}; int need_sw = 0;
-    if (r.has_v && r.v.set_swizzle) memcpy(sw, r.v.swz, 4);
-    else if (r.t.set_swz) for (int c = 0; c < 4; c++) sw[c] = (uint8_t)(r.t.swz >> (3 * c) & 7);
-    for (int c = 0; c < 4; c++) { if (sw[c] > MTLTextureSwizzleAlpha) sw[c] = (uint8_t)(MTLTextureSwizzleRed + c); if (sw[c] != MTLTextureSwizzleRed + c) need_sw = 1; }
-    if ((r.has_v && (r.v.set_format || r.v.set_levels || r.v.set_layers || r.v.set_target)) || need_sw) {
+    // Channel swizzle: composed with the format component mapping (e.g. RGB565 vs B5G6R5Unorm: bits 0..4 are red in NVN, blue in Metal).
+    // User swizzle is from view if set, otherwise from texture builder; identity builds no view
+    int cur_fmt = (r.has_v && r.v.set_format) ? r.v.format : rp->t.d.format;
+    uint32_t pf = (uint32_t)base.pixelFormat;
+    uint8_t fswz[4] = {NVN_SWZ_R, NVN_SWZ_G, NVN_SWZ_B, NVN_SWZ_A};
+    if (cur_fmt) {
+        uint32_t npf = 0;
+        if (nvn_fmt_to_mtl(cur_fmt, &npf, fswz) && npf && r.has_v && r.v.set_format) pf = npf;
+    }
+    int is_stencil_view = (r.has_v && r.v.set_dsmode && r.v.dsmode == 1);
+    if (is_stencil_view) {
+        if (base.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) pf = (uint32_t)261 /* MTLPixelFormatX32_Stencil8 */;
+        else if (base.pixelFormat == (MTLPixelFormat)255) pf = 262 /* MTLPixelFormatX24_Stencil8 */;
+    }
+    uint8_t u_sw[4] = {NVN_SWZ_R, NVN_SWZ_G, NVN_SWZ_B, NVN_SWZ_A};
+    int has_usr_sw = 0;
+    if (r.has_v && r.v.set_swizzle) { memcpy(u_sw, r.v.swz, 4); has_usr_sw = 1; }
+    else if (r.t.set_swz) { for (int c = 0; c < 4; c++) u_sw[c] = (uint8_t)(r.t.swz >> (3 * c) & 7); has_usr_sw = 1; }
+    uint8_t sw[4] = {MTLTextureSwizzleRed, MTLTextureSwizzleGreen, MTLTextureSwizzleBlue, MTLTextureSwizzleAlpha};
+    int need_sw = 0;
+    int rb_swap = (fswz[0] == NVN_SWZ_B && fswz[2] == NVN_SWZ_R);
+    if (has_usr_sw || rb_swap) {
+        for (int c = 0; c < 4; c++) {
+            uint8_t u = u_sw[c];
+            if (u == NVN_SWZ_ZERO) sw[c] = MTLTextureSwizzleZero;
+            else if (u == NVN_SWZ_ONE) sw[c] = MTLTextureSwizzleOne;
+            else if (u == NVN_SWZ_R) sw[c] = rb_swap ? MTLTextureSwizzleBlue : MTLTextureSwizzleRed;
+            else if (u == NVN_SWZ_G) sw[c] = MTLTextureSwizzleGreen;
+            else if (u == NVN_SWZ_B) sw[c] = rb_swap ? MTLTextureSwizzleRed : MTLTextureSwizzleBlue;
+            else if (u == NVN_SWZ_A) sw[c] = MTLTextureSwizzleAlpha;
+            else sw[c] = (uint8_t)(MTLTextureSwizzleRed + c);
+            if (sw[c] != MTLTextureSwizzleRed + c) need_sw = 1;
+        }
+    }
+    if ((r.has_v && (r.v.set_format || r.v.set_levels || r.v.set_layers || r.v.set_target || is_stencil_view)) || need_sw) {
         if (!r.has_v) memset(&r.v, 0, sizeof r.v);
-        uint32_t pf = (uint32_t)base.pixelFormat; uint8_t swz[4];
-        if (r.v.set_format && !(nvn_fmt_to_mtl(r.v.format, &pf, swz) && pf)) pf = (uint32_t)base.pixelFormat;
         if (r.v.set_format && nvn_fmt_bc(rp->t.d.format) && !nvn_fmt_bc(r.v.format)) {   // the raw blocks of a BC texture through an uncompressed view (see rt_view_fmt): Metal has no such view
             RED_ONCE(86, "Metal cannot create the raw-block view of a compressed texture (NVN format %#x → view %#x): treated as an empty slot", rp->t.d.format, r.v.format);
             return nil;
         }
-        if (r.v.set_format && tex_need_pfv(base.pixelFormat, (MTLPixelFormat)pf) && !(base.usage & MTLTextureUsagePixelFormatView)) {
+        if ((r.v.set_format || is_stencil_view) && tex_need_pfv(base.pixelFormat, (MTLPixelFormat)pf) && !(base.usage & MTLTextureUsagePixelFormatView)) {
             base = tex_upgrade_pfv(&rp->t, base, (MTLPixelFormat)pf);
             sg = g_ser_gen;
         }

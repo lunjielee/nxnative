@@ -268,6 +268,13 @@ The game's own work and its frame rate stay as they are; the host avoids work of
 - **Frame rate:** 60 fps, as on the Switch (present interval 1).
 - **Mac input:** a fresh save goes through the first-boot notices (the privacy prompt's second button is "Next"), the title and Investigations 1's Episode 1 with `DM_KEYS="f600:A~0.3,f1200:A~0.3,f1800:A~0.3,f2400:A~0.3,f3000:Down~0.3,f3200:A~0.3,f3800:A~0.3,f4400:A~0.3,f5000:A~0.3,f5600:A~0.3,f6200:A~0.3,f6800:A~0.3*270/120"` (the first investigation in Edgeworth's office at about frame 18,000; at about frame 30,000 the first Logic prompt waits for L).
 
+**The Legend of Zelda: Echoes of Wisdom (`01008CF01BAAC000`)**
+- **Status:** playable on an iPhone and runs on the Mac.
+- **Engine:** Grezzo's engine on NintendoWare, SDK 20.0.0, update 1.1.0 (v196608). Modules: main + subsdk0 + subsdk1 + sdk.
+- **Files:** The RomFS uses a `region_common` base directory overlaid with regional language folders (`regionUS`, etc.). The host automatically detects and overlays `region_common` when present (`hle_fs.c`). The engine's basic_filebuf uses standard C library stdio calls (`fopen`, `fread`, `fseek`, `ftell`, `fclose`), which the host intercepts and maps from Horizon virtual paths (`rom:/...`) to host paths.
+- **Graphics:** NVN on Metal. Handled `MTLPixelFormatX32_Stencil8` / `X24_Stencil8` stencil aspect views in texture views, composed B5G6R5Unorm channel swizzle with format component mapping, and provided a dummy non-zero ZCull storage size (`0x1000`) required by the engine's block allocator.
+- **Patches:** A rewriter cut on 1.1.0 `main` (`patch_nso.py` at `main+0x8b37c`) adds a null check in the sheet lookup routine (`0x8b33c`) to prevent a null pointer dereference after the table container is reset.
+
 ## Tools (`dm/tools`)
 
 | Tool | What it does |

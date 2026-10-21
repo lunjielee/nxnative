@@ -235,6 +235,12 @@ CUTS = {
     # SleepThread and a poll), then steps the game by the time that really passed (+0x24, seconds). fps (+0x30) is 30, from engine data (main+0x166daa4)
     (0x166db80, '14159f1a', '94078052', 'KIDS frame task wait: csinc w20,w8,wzr,ne (fps, at least 1) → mov w20,#60 (wait 1/60 s; the step stays the measured time)', 'host-only'),
   ],
+  # The Legend of Zelda: Echoes of Wisdom 1.1.0 (v196608) main: sheet lookup null check in 0x8b33c
+  '9f221e1afa65ba5443e955158ab97da8': [
+    (0x8b37c, '08e0403908011b3208e0003968be40391f050071c1020054',
+     '800000b408e0403908011b3208e0003968be4039c8020036',
+     'sheet lookup null check: 0x8f1f8 returns null when table container was reset; skip [x0,#0x38]|=0x20 and branch to [x19,#0x2f] check'),
+  ],
 }
 # ---- Registered observation gates: {NSO build ID: [(offset, number, original instruction word, reason)]}. Numbers match OBS_* in the host's hle.h;
 # the original instruction must be position independent (no PC-relative / branch / anything involving x18 or tpidr), asserted offline; when the host has no callback attached the gate block goes in and out once and returns ----
